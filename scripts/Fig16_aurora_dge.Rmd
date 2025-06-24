@@ -1,0 +1,198 @@
+---
+title: "AURORA DGE Analysis"
+output: html_document
+date: "2025-06-23"
+---
+```{r Load Libraries, include=FALSE}
+
+library(limma)
+library(edgeR)
+library(stringr)
+library(EnhancedVolcano)
+library(biomaRt)
+library(fgsea)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+
+aurora_meta <- read_excel("data/aurora_metadata.xlsx")
+
+nf1_SE_psi <- read_excel("data/nf1_SE_psi.xlsx")
+
+aurora_meta <- left_join(nf1_SE_psi, aurora_meta,  c("Sample_ID" = "SRR Run Identifier") )
+
+# Create a new column for deltaNLS_percent
+aurora_meta <- aurora_meta %>%
+  mutate(deltaNLS_percent = (1 - ID_117781) * 100)
+
+# Identify primary expression values and determine deltaNLS_change
+aurora_meta <- aurora_meta %>%
+  group_by(Patient) %>%
+  mutate(
+    primary_expression = if(any(Sample_Type.x == "Primary")) deltaNLS_percent[Sample_Type.x == "Primary"] else NA,
+    deltaNLS_change = case_when(
+      Sample_Type.x == "Metastatic" & deltaNLS_percent > primary_expression ~ "Increased",
+      Sample_Type.x == "Metastatic" & deltaNLS_percent <= primary_expression ~ "Decreased",
+      Sample_Type.x == "Primary" ~ NA_character_
+    )
+  ) %>%
+  ungroup() %>%
+  dplyr::select(-primary_expression)
+
+# Import and Clean Raw Count Data
+raw_counts <- read.csv("data/GSE209998_AUR_129_raw_counts.csv")
+raw_counts$Gene <- make.unique(as.character(raw_counts$Gene))
+rownames(raw_counts) <- raw_counts$Gene
+raw_counts <- raw_counts[, -1]
+
+# Filter for Metastatic Samples & Subtypes
+aurora_meta$`BCR Sample barcode` <- gsub("-", ".", aurora_meta$`BCR Sample barcode`)
+
+metastatic_metadata <- aurora_meta %>%
+  filter(Sample_Type.x == "Metastatic", 
+         `PAM50 Call` %in% c("LumA", "LumB", "Her2", "Basal")) %>%
+  filter(!is.na(deltaNLS_change)) 
+
+metastatic_samples <- metastatic_metadata$`BCR Sample barcode`
+common_samples <- intersect(colnames(raw_counts), metastatic_samples)
+filtered_raw_counts <- raw_counts[, common_samples]
+filtered_raw_counts <- filtered_raw_counts[, metastatic_metadata$`BCR Sample barcode`]
+
+# Create DGEList and Filter Low-Expressed Genes
+group <- factor(metastatic_metadata$deltaNLS_change, levels = c("Decreased", "Increased"))
+dge <- DGEList(counts = filtered_raw_counts, group = group)
+
+keep <- rowSums(dge$counts > 5) >= 14
+dge <- dge[keep, ]
+
+# Normalize, Estimate Dispersion, Fit Model
+dge <- calcNormFactors(dge)
+dge <- estimateDisp(dge)
+fit <- glmQLFit(dge)
+qlf <- glmQLFTest(fit, coef = 2)
+
+# Extract and Save Results
+result_table <- topTags(qlf, n = Inf)$table
+result_table$external_gene_name <- rownames(result_table)
+
+# Optional: write out results
+# write.csv(result_table, "output/aurora_de_results.csv", row.names = FALSE)
+
+```
+
+```{r Volcano Plot, include=FALSE}
+
+# Volcano Plot
+significant_genes <- result_table %>%
+  filter(FDR < 0.05 & abs(logFC) >= 0.5)
+
+top_genes_to_label <- result_table %>%
+  filter(FDR < 1e-5 & abs(logFC) > 0.1)
+
+lab <- ifelse(rownames(result_table) %in% rownames(top_genes_to_label),
+              result_table$external_gene_name, "")
+
+EnhancedVolcano(
+  result_table,
+  lab = lab,
+  x = 'logFC',
+  y = 'FDR',
+  pCutoff = 0.05,
+  FCcutoff = 0.5,
+  xlim = c(-5.5, 5.5),
+  ylim = c(0, 15),
+  pointSize = 2,
+  labSize = 3,
+  title = 'NLS SE High vs Low',
+  subtitle = 'Differential Expression (Metastatic Samples)',
+  legendPosition = "right",
+  legendLabSize = 14,
+  col = c('grey30', 'forestgreen', 'royalblue', 'red2'),
+  colAlpha = 0.8,
+  drawConnectors = TRUE,
+  widthConnectors = 0.8,
+  boxedLabels = TRUE,
+  ylab = "FDR",
+  max.overlaps = Inf
+)
+
+```
+
+```{r GSEA, include=FALSE}
+
+# Hallmark Gene Set Enrichment Analysis 
+library(msigdbr)
+library(fgsea)
+library(data.table)
+library(ggplot2)
+library(stringr)
+
+set.seed(10242024)
+
+# Define DE thresholds
+logFC_cutoff <- 0.5
+FDR_cutoff <- 0.05
+
+# Filter significant genes
+result_table_filtered <- result_table %>%
+  filter(abs(logFC) >= logFC_cutoff & FDR < FDR_cutoff)
+
+# Create signed -log10(p-value) ranks
+result_table$ranks <- -log10(result_table$PValue) * sign(result_table$logFC)
+ranks_vector <- setNames(result_table$ranks, result_table$external_gene_name)
+
+# Replace NA/Inf values with median
+finite_median <- median(ranks_vector[is.finite(ranks_vector)], na.rm = TRUE)
+ranks_vector[!is.finite(ranks_vector)] <- finite_median
+
+# Run FGSEA using Hallmark pathways
+
+hallmark_pathways <- msigdbr(species = "human", category = "H") %>%
+  split(x = .$gene_symbol, f = .$gs_name)
+
+fgsea_results <- fgsea(
+  pathways = hallmark_pathways,
+  stats = ranks_vector,
+  minSize = 15,
+  maxSize = 500
+)
+
+# Extract and prepare top enriched pathways for plotting
+top_up <- fgsea_results %>%
+  filter(NES > 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 10)
+
+top_down <- fgsea_results %>%
+  filter(NES < 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 10)
+
+top_pathways <- bind_rows(top_up, top_down) %>%
+  arrange(NES) %>%
+  mutate(
+    pathway = factor(pathway, levels = unique(pathway)),
+    pathway_simplified = str_remove(pathway, "HALLMARK_") %>%
+                         str_replace_all("_", " "),
+    pathway_simplified = factor(pathway_simplified, levels = unique(pathway_simplified))
+  )
+
+# Plot NES for top 20 pathways (10 up, 10 down)
+
+ggplot(top_pathways, aes(x = pathway_simplified, y = NES, fill = padj)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_c(option = "viridis", direction = -1, name = "Adjusted P-value") +
+  coord_flip() +
+  labs(
+    title = "Top Hallmark Pathways (Up & Downregulated)",
+    x = "Hallmark Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(face = ifelse(top_pathways$padj < 0.05, "bold", "plain")),
+    plot.title = element_text(face = "bold")
+  )
+
+```

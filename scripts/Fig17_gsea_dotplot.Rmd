@@ -1,0 +1,372 @@
+---
+title: "MCF7_DGE_Analysis"
+output: html_document
+date: "2025-06-13"
+---
+
+```{r Create DGE Tables, include=FALSE}
+
+library(limma)
+library(edgeR)
+library(stringr)
+library(EnhancedVolcano)
+library(biomaRt)
+library(fgsea)
+library(data.table)
+library(ggplot2)
+
+# STAR anlignment directory 
+star_dir <- ("data/bams/")
+
+# Read counts
+files <- list.files(star_dir, pattern = "ReadsPerGene.out.tab", full.names = FALSE)
+names(files) <- str_remove_all(files, ".ReadsPerGene.out.tab$")
+ 
+counts_col <- 4
+ 
+dge <- edgeR::readDGE(files, path = star_dir, columns = c(1, counts_col),
+                      skip=4, labels = names(files), header=FALSE)
+
+# Filter genes to keep only those with a minimum count threshold
+keep <- rowSums(dge$counts > 5) >= 3  # At least 5 count-per-million (CPM) in at least 3 samples
+table(keep)
+dge <- dge[keep, ]
+
+# Desired order of sample names
+sample_order <- c("M7EVVe1", "M7EVVe2", "M7EVVe3", "M733Ve1", "M733Ve2", "M733Ve3", "M7EVVd1", "M7EVVd2", "M7EVVd3", "M733Vd1", "M733Vd2", "M733Vd3", "M7EVE21", "M7EVE22", "M7EVE23", "M733E21", "M733E22", "M733E23", "M7EVTam1", "M7EVTam2", "M7EVTam3", "M733Tam1", "M733Tam2", "M733Tam3", "M7EV9271", "M7EV9272", "M7EV9273", "M7339271", "M7339272", "M7339273", "M7EVCob1", "M7EVCob2", "M7EVCob3", "M733Cob1", "M733Cob2", "M733Cob3" )
+
+# Reorder the samples in the counts matrix
+dge$counts <- dge$counts[, match(sample_order, colnames(dge$counts))]
+dge$samples <- dge$samples[match(sample_order, rownames(dge$samples)), ]
+
+# Check the order of sample names in the counts matrix
+colnames(dge$counts)
+
+# Check the order of samples in the samples dataframe
+rownames(dge$samples)
+
+# Assuming the order of samples in the DGEList counts matrix follows the order mentioned
+group <- factor(c("EV EtOH", "EV EtOH", "EV EtOH", "33 EtOH", "33 EtOH", "33 EtOH", "EV DMSO", "EV DMSO", "EV DMSO", "33 DMSO", "33 DMSO", "33 DMSO", "EV E2", "EV E2", "EV E2", "33 E2", "33 E2", "33 E2", "EV Tamoixfen", "EV Tamoxifen", "EV Tamoxifen", "33 Tamoxifen", "33 Tamoxifen", "33 Tamoxifen", "EV SERD", "EV SERD", "EV SERD", "33 SERD", "33 SERD", "33 SERD", "EV Cobimetinib", "EV Cobimetinib", "EV Cobimetinib", "33 Cobimetinib", "33 Cobimetinib", "33 Cobimetinib"))
+
+# Design matrix for differential expression analysis
+design <- model.matrix(~ group)
+
+# Assign group factor to the DGEList metadata
+dge$samples$group <- group
+
+# Print out the samples to check group assignment
+dge$samples
+
+# Normalize library sizes
+dge <- calcNormFactors(dge)
+
+# Estimate dispersion
+dge <- estimateDisp(dge, design)
+
+# Save raw filtered counts
+write.csv(dge$counts, file = "output/MCF7_raw_filtered_counts.csv")
+
+# Compute CPM with normalization (TMM)
+normalized_cpm <- cpm(dge, normalized.lib.sizes = TRUE)
+
+# Save normalized CPM matrix
+write.csv(normalized_cpm, file = "output/MCF7_normalized_CPM.csv")
+
+```
+
+```{r DGE Results, include=FALSE}
+
+# EV vs 33 differential expression analysis
+EtOH <- exactTest(dge, pair=c("EV EtOH", "33 EtOH"))
+DMSO <- exactTest(dge, pair=c("EV DMSO", "33 DMSO"))
+E2 <- exactTest(dge, pair=c("EV E2", "33 E2"))
+Tam <- exactTest(dge, pair=c("EV Tamoxifen", "33 Tamoxifen"))
+SERD <- exactTest(dge, pair=c("EV SERD", "33 SERD"))
+Cobi <- exactTest(dge, pair=c("EV Cobimetinib", "33 Cobimetinib"))
+
+# Extract complete result table
+EtOH_results <- as.data.frame(EtOH$table)
+DMSO_results <- as.data.frame(DMSO$table)
+E2_results <- as.data.frame(E2$table)
+Tam_results <- as.data.frame(Tam$table)
+SERD_results <- as.data.frame(SERD$table)
+Cobi_results <- as.data.frame(Cobi$table)
+
+# Calculate adjusted pvalues 
+EtOH_results$adjusted_pvalue <- p.adjust(EtOH_results$PValue, method = "BH")
+DMSO_results$adjusted_pvalue <- p.adjust(DMSO_results$PValue, method = "BH")
+E2_results$adjusted_pvalue <- p.adjust(E2_results$PValue, method = "BH")
+Tam_results$adjusted_pvalue <- p.adjust(Tam_results$PValue, method = "BH")
+SERD_results$adjusted_pvalue <- p.adjust(SERD_results$PValue, method = "BH")
+Cobi_results$adjusted_pvalue <- p.adjust(Cobi_results$PValue, method = "BH")
+
+# Add ensg IDs 
+EtOH_results$ensg_id <- rownames(EtOH_results)
+DMSO_results$ensg_id <- rownames(DMSO_results)
+E2_results$ensg_id <- rownames(E2_results)
+Tam_results$ensg_id <- rownames(Tam_results)
+SERD_results$ensg_id <- rownames(SERD_results)
+Cobi_results$ensg_id <- rownames(Cobi_results)
+
+# Remove version number from ensg ID 
+EtOH_results$ensg_id <- gsub("\\..*$", "", EtOH_results$ensg_id)
+DMSO_results$ensg_id <- gsub("\\..*$", "", DMSO_results$ensg_id)
+E2_results$ensg_id <- gsub("\\..*$", "", E2_results$ensg_id)
+Tam_results$ensg_id <- gsub("\\..*$", "", Tam_results$ensg_id)
+SERD_results$ensg_id <- gsub("\\..*$", "", SERD_results$ensg_id)
+Cobi_results$ensg_id <- gsub("\\..*$", "", Cobi_results$ensg_id)
+
+# Create column with gene names
+# Connect to the ENSEMBL database
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+EtOH_ensg_ids <- EtOH_results$ensg_id
+DMSO_ensg_ids <- DMSO_results$ensg_id
+E2_ensg_ids <- E2_results$ensg_id
+Tam_ensg_ids <- Tam_results$ensg_id
+SERD_ensg_ids <- SERD_results$ensg_id
+Cobi_ensg_ids <- Cobi_results$ensg_id
+
+EtOH_genes <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+               filters = 'ensembl_gene_id', 
+               values = EtOH_ensg_ids, 
+               mart = ensembl)
+
+DMSO_genes <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+               filters = 'ensembl_gene_id', 
+               values = DMSO_ensg_ids, 
+               mart = ensembl)
+
+E2_genes <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+               filters = 'ensembl_gene_id', 
+               values = E2_ensg_ids, 
+               mart = ensembl)
+
+Tam_genes <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+               filters = 'ensembl_gene_id', 
+               values = Tam_ensg_ids, 
+               mart = ensembl)
+
+SERD_genes <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+               filters = 'ensembl_gene_id', 
+               values = SERD_ensg_ids, 
+               mart = ensembl)
+
+Cobi_genes <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+               filters = 'ensembl_gene_id', 
+               values = Cobi_ensg_ids, 
+               mart = ensembl)
+
+# Merge this information with your original dataframe to include gene names
+EtOH_results <- merge(EtOH_results, EtOH_genes, by.x = 'ensg_id', by.y = 'ensembl_gene_id', all.x = TRUE)
+
+DMSO_results <- merge(DMSO_results, DMSO_genes, by.x = 'ensg_id', by.y = 'ensembl_gene_id', all.x = TRUE)
+
+E2_results <- merge(E2_results, E2_genes, by.x = 'ensg_id', by.y = 'ensembl_gene_id', all.x = TRUE)
+
+Tam_results <- merge(Tam_results, Tam_genes, by.x = 'ensg_id', by.y = 'ensembl_gene_id', all.x = TRUE)
+
+SERD_results <- merge(SERD_results, SERD_genes, by.x = 'ensg_id', by.y = 'ensembl_gene_id', all.x = TRUE)
+
+Cobi_results <- merge(Cobi_results, Cobi_genes, by.x = 'ensg_id', by.y = 'ensembl_gene_id', all.x = TRUE)
+
+
+```
+
+```{r GSEA, include=FALSE}
+
+library(msigdbr)
+library(fgsea)
+library(data.table)
+library(ggplot2)
+
+set.seed(4262024)
+
+aurora_DGE <- read.csv("data/aurora_de_results.csv")
+
+# Filter for adjusted_pvalue < 0.05
+EtOH_filtered <- EtOH_results %>%
+  filter(adjusted_pvalue < 0.05)
+
+E2_filtered <- E2_results %>%
+  filter(adjusted_pvalue < 0.05)
+
+Tam_filtered <- Tam_results %>%
+  filter(adjusted_pvalue < 0.05)
+
+Cobi_filtered <- Cobi_results %>%
+  filter(adjusted_pvalue < 0.05)
+
+result_table_filtered <- aurora_DGE %>%
+  filter(FDR < 0.1)
+
+# Convert p-values to ranks and consider the direction of change
+EtOH_filtered$ranks <- -log10(EtOH_filtered$PValue) * sign(EtOH_filtered$logFC)
+E2_filtered$ranks <- -log10(E2_filtered$PValue) * sign(E2_filtered$logFC)
+Tam_filtered$ranks <- -log10(Tam_filtered$PValue) * sign(Tam_filtered$logFC)
+Cobi_filtered$ranks <- -log10(Cobi_filtered$PValue) * sign(Cobi_filtered$logFC)
+result_table_filtered$ranks <- -log10(result_table_filtered$PValue) * sign(result_table_filtered$logFC)
+
+# Create a named vector
+EtOH_exampleRanks <- setNames(EtOH_filtered$ranks, EtOH_filtered$external_gene_name)
+E2_exampleRanks <- setNames(E2_filtered$ranks, E2_filtered$external_gene_name)
+Tam_exampleRanks <- setNames(Tam_filtered$ranks, Tam_filtered$external_gene_name)
+Cobi_exampleRanks <- setNames(Cobi_filtered$ranks, Cobi_filtered$external_gene_name)
+result_table_filtered_exampleRanks <- setNames(result_table_filtered$ranks, result_table_filtered$external_gene_name)
+
+# Check the first few entries of the ranks vector
+head(exampleRanks)
+
+# Assuming 'exampleRanks' is your stats vector
+sum(is.na(EtOH_exampleRanks))  # Count NA values
+sum(is.infinite(EtOH_exampleRanks))  # Count Inf and -Inf values
+
+sum(is.na(E2_exampleRanks))  # Count NA values
+sum(is.infinite(E2_exampleRanks))  # Count Inf and -Inf values
+
+sum(is.na(Tam_exampleRanks))  # Count NA values
+sum(is.infinite(Tam_exampleRanks))  # Count Inf and -Inf values
+
+sum(is.na(Cobi_exampleRanks))  # Count NA values
+sum(is.infinite(Cobi_exampleRanks))  # Count Inf and -Inf values
+
+sum(is.na(result_table_filtered_exampleRanks))  # Count NA values
+sum(is.infinite(result_table_filtered_exampleRanks))  # Count Inf and -Inf values
+
+# Replace NA and infinite values with the median of the finite values in the vector
+EtOH_finite_median <- median(EtOH_exampleRanks[is.finite(EtOH_exampleRanks)], na.rm = TRUE)
+EtOH_exampleRanks[!is.finite(EtOH_exampleRanks)] <- EtOH_finite_median
+
+E2_finite_median <- median(E2_exampleRanks[is.finite(E2_exampleRanks)], na.rm = TRUE)
+E2_exampleRanks[!is.finite(E2_exampleRanks)] <- E2_finite_median
+
+Tam_finite_median <- median(Tam_exampleRanks[is.finite(Tam_exampleRanks)], na.rm = TRUE)
+Tam_exampleRanks[!is.finite(Tam_exampleRanks)] <- Tam_finite_median
+
+Cobi_finite_median <- median(Cobi_exampleRanks[is.finite(Cobi_exampleRanks)], na.rm = TRUE)
+Cobi_exampleRanks[!is.finite(Cobi_exampleRanks)] <- Cobi_finite_median
+
+result_table_filtered_finite_median <- median(result_table_filtered_exampleRanks[is.finite(result_table_filtered_exampleRanks)], na.rm = TRUE)
+result_table_filtered_exampleRanks[!is.finite(result_table_filtered_exampleRanks)] <- result_table_filtered_finite_median
+
+# Should return 0 if all values are now finite
+sum(!is.finite(EtOH_exampleRanks))
+sum(!is.finite(E2_exampleRanks))
+sum(!is.finite(Tam_exampleRanks))
+sum(!is.finite(Cobi_exampleRanks))
+sum(!is.finite(result_table_filtered_exampleRanks))
+
+duplicated_genes <- names(exampleRanks)[duplicated(names(exampleRanks))]
+print(duplicated_genes)
+
+exampleRanks <- exampleRanks[!duplicated(names(exampleRanks))]
+
+sum(duplicated(exampleRanks))
+
+exampleRanks <- jitter(exampleRanks, factor = 1e-6)
+
+sum(duplicated(exampleRanks))
+
+pathwaysH <- msigdbr("human", category="H")
+pathwaysH <- split(pathwaysH$gene_symbol, pathwaysH$gs_name)
+
+EtOH_fgseaResH <- fgsea(pathways = pathwaysH,
+                  stats    = EtOH_exampleRanks,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+E2_fgseaResH <- fgsea(pathways = pathwaysH,
+                  stats    = E2_exampleRanks,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+Tam_fgseaResH <- fgsea(pathways = pathwaysH,
+                  stats    = Tam_exampleRanks,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+Cobi_fgseaResH <- fgsea(pathways = pathwaysH,
+                  stats    = Cobi_exampleRanks,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+rtf_fgseaResH <- fgsea(pathways = pathwaysH,
+                  stats    = result_table_filtered_exampleRanks,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+# Extract pathways from each result table
+EtOH_pathways <- EtOH_fgseaResH$pathway
+E2_pathways <- E2_fgseaResH$pathway
+Tam_pathways <- Tam_fgseaResH$pathway
+Cobi_pathways <- Cobi_fgseaResH$pathway
+rtf_pathways <- rtf_fgseaResH$pathway
+
+# Find common pathways across all datasets
+common_pathways <- Reduce(intersect, list(EtOH_pathways, E2_pathways, Tam_pathways, Cobi_pathways, rtf_pathways))
+
+# Print the common pathways
+print(common_pathways)
+
+# Function to extract NES and padj values for common pathways
+extract_gsea_data <- function(fgsea_res, dataset_name) {
+  fgsea_res %>%
+    filter(pathway %in% common_pathways) %>%
+    dplyr::select(pathway, NES, padj) %>%
+    mutate(Dataset = dataset_name)
+}
+
+# Apply function to all datasets
+EtOH_data <- extract_gsea_data(EtOH_fgseaResH, "Vehicle")
+E2_data <- extract_gsea_data(E2_fgseaResH, "E2")
+Tam_data <- extract_gsea_data(Tam_fgseaResH, "Tamoxifen")
+Cobi_data <- extract_gsea_data(Cobi_fgseaResH, "Cobimetinib")
+rtf_data <- extract_gsea_data(rtf_fgseaResH, "AURORA NLS SE Up")
+
+# Combine all datasets into one
+gsea_combined <- bind_rows(EtOH_data, E2_data, Tam_data, Cobi_data, rtf_data)
+
+# Function to clean pathway names
+clean_pathway_names <- function(pathway) {
+  pathway <- gsub("HALLMARK_", "", pathway)  # Remove "HALLMARK_" prefix
+  pathway <- gsub("KEGG_", "", pathway)  # Remove "KEGG_" prefix
+  pathway <- gsub("REACTOME_", "", pathway)  # Remove "REACTOME_" prefix
+  pathway <- gsub("_", " ", pathway)  # Replace underscores with spaces
+  pathway <- tolower(pathway)  # Convert to lowercase
+  pathway <- tools::toTitleCase(pathway)  # Capitalize first letters
+  return(pathway)
+}
+
+# Apply function to clean pathway names
+gsea_combined$pathway <- sapply(gsea_combined$pathway, clean_pathway_names)
+
+# Order pathways by descending NES score (average across datasets)
+pathway_order <- gsea_combined %>%
+  group_by(pathway) %>%
+  summarise(mean_NES = mean(NES, na.rm = TRUE)) %>%
+  arrange(desc(mean_NES)) %>%
+  pull("pathway")
+
+# Apply this order to the `pathway` factor
+gsea_combined$pathway <- factor(gsea_combined$pathway, levels = pathway_order)
+
+
+# Define the desired dataset order
+gsea_combined$Dataset <- factor(gsea_combined$Dataset, 
+                                levels = c("Cobimetinib", "Tamoxifen", "E2", "Vehicle", "AURORA NLS SE Up"))
+
+ggplot(gsea_combined, aes(y = Dataset, x = pathway, size = -log10(padj), color = NES)) +
+  geom_point() +
+  scale_color_gradient(low = "blue", high = "red") +  # NES color scale (low NES = blue, high NES = red)
+  theme_minimal() +
+  theme(text = element_text(family = "sans", size = 11),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 12)) +  # Adjust text size
+  labs(title = "Common Pathways Across Datasets",
+       x = "Pathway",
+       y = "Dataset",
+       color = "NES",
+       size = "-log10(padj)") 
+
+
+```

@@ -1,0 +1,248 @@
+---
+title: "NF1 NLS SE Survival Analysis"
+output: html_document
+date: "2025-06-11"
+---
+
+```{r setup, include=FALSE}
+
+# Load Required Libraries
+
+library(dplyr)
+library(survival)
+library(ggplot2)
+library(tibble)
+library(ggsurvfit)
+library(gtsummary)
+library(readxl)
+library(cmprsk)
+library(survminer)
+library(gridExtra)
+library(flextable)
+
+```
+
+```{r Import & Clean Metadata, include=FALSE}
+
+
+# Import & Clean Metadata
+
+surv_meta <- read.delim("data/brca_tcga_metadata.txt")
+
+# Filter complete cases for survival analysis
+clean_meta <- surv_meta %>%
+  filter(!is.na(Overall.Survival.Status),
+         !is.na(Overall.Survival..Months.),
+         !is.na(Mutation.Count),
+         !is.na(Diagnosis.Age),
+         PAM50_mRNA_nature2012 != "",
+         !is.na(PAM50_mRNA_nature2012),
+         NLS.Status != "",
+         !is.na(NLS.Status)) %>%
+  mutate(
+    TP53 = recode(TP53, "YES" = "MUT", "NO" = "WT"),
+    PIK3CA = recode(PIK3CA, "YES" = "MUT", "NO" = "WT"),
+    NLS.Status = recode(NLS.Status, "SPLICED" = "NF1 NLS SE", "UNSPLICED" = "NLS Inc"),
+    PAM50 = PAM50_mRNA_nature2012
+  )
+
+# Limit to 10-year survival
+ten_yr_meta <- clean_meta %>%
+  filter(Overall.Survival..Months. <= 120) %>%
+  mutate(PAM50 = ifelse(PAM50 %in% c("Luminal A", "Luminal B"), "Luminal", PAM50))
+
+```
+
+
+```{r KM Curve, include=FALSE}
+
+# Kaplan-Meier fit
+overall_km <- survfit2(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ 1, data = ten_yr_meta)
+
+# 10-year survival probability
+summary(overall_km, times = 120)
+
+# Plot KM
+ggsurvfit(overall_km) +
+  add_confidence_interval() +
+  add_risktable() +
+  labs(x = "Months", y = "Overall Survival Probability")
+
+```
+
+
+```{r COX Models, include=FALSE}
+
+# Univariable Cox model
+univ_cox <- coxph(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ NLS.Status, data = ten_yr_meta)
+
+tbl_regression(univ_cox, exponentiate = TRUE) %>%
+  bold_labels() %>%
+  as_flex_table()
+
+# Multivariable Cox model
+mv_fit <- coxph(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ 
+                  NLS.Status + Mutation.Count + Diagnosis.Age + NF1.Status + TP53 + PIK3CA, 
+                data = ten_yr_meta)
+
+tbl_regression(mv_fit, exponentiate = TRUE) %>%
+  bold_labels() %>%
+  as_flex_table()
+
+# Stratified by PAM50
+mv_fit_strat <- coxph(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ 
+                        NLS.Status + Mutation.Count + Diagnosis.Age + NF1.Status + TP53 + PIK3CA + strata(PAM50), 
+                      data = ten_yr_meta)
+
+# Test proportional hazards assumption
+cox.zph(mv_fit_strat)
+
+# Cox table for export
+cox_table <- tbl_regression(
+  mv_fit_strat,
+  exponentiate = TRUE,
+  label = list(
+    NLS.Status ~ "NLS Status (NLS Inc vs. NLS SE)",
+    Mutation.Count ~ "Mutation Count",
+    Diagnosis.Age ~ "Diagnosis Age",
+    NF1.Status ~ "NF1 Status",
+    TP53 ~ "TP53",
+    PIK3CA ~ "PIK3CA"
+  )
+) %>%
+  modify_header(label = "**Variable**") %>%
+  modify_spanning_header(c(estimate, ci, p.value) ~ "**Hazard Ratios (95% CI)**") %>%
+  bold_labels() %>%
+  bold_p() %>%
+  as_flex_table() %>%
+  font(fontname = "Arial")
+
+# Save table
+flextable::save_as_docx(cox_table, path = "data/mv_fit_strat_cox_results.docx")
+
+# KM fit for all samples
+km_all <- survfit2(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ NLS.Status, data = ten_yr_meta)
+
+# Plot
+km_plot_all <- ggsurvfit(km_all) +
+  add_censor_mark(shape = 3, size = 1, color = "black", stroke = 0.75) +
+  scale_color_manual(values = c("red", "black"),
+                     labels = c("NLS SE", "NLS Inclusion")) +
+  labs(title = "Overall Survival by NF1 NLS Splicing Status",
+       x = "Time (Months)", y = "Survival Probability", color = "NLS Status") +
+  theme_classic(base_size = 14)
+
+#   Subtype-specific KM Analysis
+
+
+# Subtype split
+subtype_dfs <- split(ten_yr_meta, ten_yr_meta$PAM50)
+
+# Function to run and plot KM + Cox for a subtype
+analyze_subtype <- function(df, subtype_name) {
+  km <- survfit2(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ NLS.Status, data = df)
+  mv <- coxph(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ 
+                NLS.Status + Mutation.Count + Diagnosis.Age + NF1.Status, data = df)
+  pval <- summary(mv)$logtest["pvalue"]
+  
+  plot <- ggsurvfit(km) +
+    add_censor_mark(shape = 3, size = 1, color = "black", stroke = 0.75) +
+    scale_color_manual(values = c("red", "black"),
+                       labels = c("NLS Se", "NLS Inc")) +
+    annotate("text", x = max(km$time) * 0.25, y = 0.05,
+             label = paste0("p = ", format(pval, scientific = TRUE, digits = 2)),
+             size = 5, fontface = "bold") +
+    labs(title = paste("Survival by NF1 NLS SE in", subtype_name),
+         x = "Time (Months)", y = "Overall Survival Probability") +
+    theme_classic(base_size = 14)
+  
+  return(plot)
+}
+
+# Generate plots
+plot_luminal <- analyze_subtype(subtype_dfs[["Luminal"]], "Luminal")
+plot_her2    <- analyze_subtype(subtype_dfs[["HER2-enriched"]], "HER2-Enriched")
+plot_basal   <- analyze_subtype(subtype_dfs[["Basal-like"]], "Basal-Like")
+
+
+```
+
+``` {r ER-Alpha NLS & Survival, include = FALSE}
+
+luminal_meta <- ten_yr_meta %>%
+  mutate(
+    ERalpha.NLS = na_if(ERalpha.NLS, "null"),
+    ERalpha.NLS = as.numeric(ERalpha.NLS),
+    ERalpha_NLS = ifelse(!is.na(ERalpha.NLS) & ERalpha.NLS > 0, "SE", "Inclusion")
+  )
+
+# Contingency table
+table(luminal_meta$NLS.Status, luminal_meta$ERalpha_NLS)
+
+# Fisher's Exact Test
+fisher.test(table(luminal_meta$NLS.Status, luminal_meta$ERalpha_NLS))
+
+mv_fit_binary <- coxph(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ 
+                        NLS.Status + ERalpha_NLS + Mutation.Count + Diagnosis.Age + NF1.Status + TP53 + PIK3CA,
+                      data = luminal_meta)
+
+summary(mv_fit_binary)
+cox.zph(mv_fit_binary)
+
+# Table
+tbl_regression(
+  mv_fit_binary,
+  exponentiate = TRUE,
+  label = list(
+    ERalpha_NLS ~ "ERα NLS Expression"
+  )
+) %>%
+  bold_labels() %>%
+  bold_p()
+
+km_er_expr <- survfit(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ ERalpha_NLS, data = luminal_meta)
+
+ggsurvfit(km_er_expr) +
+  labs(title = "Survival by ERα NLS Expression",
+       x = "Time (Months)", y = "Overall Survival Probability",
+       color = "ERα NLS") +
+  add_risktable() +
+  theme_classic()
+
+survdiff(Surv(Overall.Survival..Months., Overall.Survival.Status) ~ ERalpha_NLS, data = luminal_meta)
+
+#Stratify by TP53
+
+mv_fit_binary_strat <- coxph(
+  Surv(Overall.Survival..Months., Overall.Survival.Status) ~ 
+    NLS.Status + ERalpha_NLS + Mutation.Count + Diagnosis.Age + NF1.Status + PIK3CA + strata(TP53),
+  data = luminal_meta
+)
+
+summary(mv_fit_binary_strat)
+cox.zph(mv_fit_binary_strat)
+
+
+
+```
+
+``` {r ER-Alpha NLS & NF1 NLS Association, include = FALSE}
+
+# Contingency table
+table(luminal_meta$NLS.Status, luminal_meta$ERalpha_NLS)
+
+# Fisher's Exact Test
+fisher.test(table(luminal_meta$NLS.Status, luminal_meta$ERalpha_NLS))
+
+ggplot(luminal_meta, aes(x = NLS.Status, fill = ERalpha_NLS)) +
+  geom_bar(position = "dodge", color = "black") +
+  labs(
+    title = "Distribution of ERα NLS Expression by NF1 ∆NLS Status",
+    x = "NF1 NLS Status",
+    y = "Number of Tumors",
+    fill = "ERα NLS"
+  ) +
+  scale_fill_manual(values = c("Inclusion" = "gray80", "SE" = "red")) +
+  theme_classic(base_size = 14)
+
+```

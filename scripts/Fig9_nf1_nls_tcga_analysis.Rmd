@@ -1,0 +1,141 @@
+---
+title: "NF1 NLS TCGA glm"
+output: html_document
+date: "2025-02-17"
+---
+
+```{r setup, include=FALSE}
+
+# Load required libraries
+library(ggplot2)
+library(ggmosaic)
+library(dplyr)
+
+tcga_meta <- read.delim("data/brca_tcga_metadata.txt")
+
+clean_tcga_meta <- tcga_meta %>%
+  filter(!is.na(NLS.Status) & NLS.Status != "", 
+         !is.na(NF1.Status) & NF1.Status != "")
+
+contingency_table <- table(clean_tcga_meta$NLS.Status, clean_tcga_meta$NF1.Status)
+
+# Save contingency table
+write.table(contingency_table,
+            file = "data/contingency_table.txt",
+            sep = "\t", quote = FALSE, col.names = NA)
+
+# Perform Chi-Squared Test
+chi_sq_result <- chisq.test(contingency_table)
+
+# View results
+print(chi_sq_result)
+
+# Create a side-by-side bar plot showing the distribution of NF1 gene status within each NLS splicing group
+ggplot(clean_tcga_meta, aes(x = NLS.Status, fill = NF1.Status)) +
+  geom_bar(position = "dodge") +  
+  labs(title = "Distribution of NLS.Status by NF1.Status",
+       x = "NLS Status",
+       y = "Sample Count",
+       fill = "NF1 Status") +
+  theme_minimal() 
+
+# Calculate proportions manually
+prop_df <- clean_tcga_meta %>%
+  group_by(NLS.Status, NF1.Status) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(NLS.Status) %>%
+  mutate(proportion = count / sum(count))
+
+# Create a side-by-side bar plot showing the distribution of NF1 gene status within each NLS splicing group (proportions)
+ggplot(prop_df, aes(x = NLS.Status, y = proportion, fill = NF1.Status)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Proportion of NF1 Gene Status by NLS Splicing",
+       x = "NLS Status",
+       y = "Proportion",
+       fill = "NF1 Status") +
+  theme_minimal(base_size = 14)
+
+# Run Fisher's Exact Test
+fisher_test <- fisher.test(contingency_table)
+
+# View results
+print(fisher_test)
+
+# Save Fisher's Exact Test output
+sink("data/fisher_test_output.txt")
+cat("Fisher's Exact Test for NF1.Status vs NLS.Status\n\n")
+print(fisher_test)
+sink()  # Close the sink
+
+# Ensure NF1.Status and NLS.Status are factors
+clean_tcga_meta <- clean_tcga_meta %>%
+  mutate(NF1.Status = factor(NF1.Status, levels = c("DIPLOID", "HETLOSS")),
+         NLS.Status = factor(NLS.Status, levels = c("UNSPLICED", "SPLICED")),  
+         TP53.Status = factor(TP53),
+         PIK3CA.Status = factor(PIK3CA),
+         PAM50 = factor(PAM50_mRNA_nature2012),
+         Diagnosis.Age = factor(Diagnosis.Age))  
+
+clean_tcga_meta <- clean_tcga_meta %>%
+  filter(PAM50_mRNA_nature2012 != "Normal-like")
+
+clean_tcga_meta <- clean_tcga_meta %>%
+  mutate(PAM50 = case_when(
+    PAM50_mRNA_nature2012 %in% c("Luminal A", "Luminal B") ~ "Luminal",
+    TRUE ~ PAM50_mRNA_nature2012
+  ))
+
+logit_model_interaction_fixed <- glm(NLS.Status ~ NF1.Status + TP53.Status + PIK3CA.Status + PAM50, 
+                                     data = clean_tcga_meta, family = binomial())
+
+# Check model summary
+summary(logit_model_interaction_fixed)
+
+# Extract odds ratios and confidence intervals
+logit_results <- tidy(logit_model_interaction_fixed, conf.int = TRUE, exponentiate = TRUE)
+
+# Remove intercept for better visualization
+logit_results <- logit_results[logit_results$term != "(Intercept)", ]
+
+
+# Customize term names for better readability
+logit_results <- logit_results %>%
+  mutate(term = recode(term,
+    "NF1.StatusHETLOSS" = "NF1 HETLOSS",
+    "TP53.StatusYES" = "TP53 Mutation",
+    "PIK3CA.StatusYES" = "PIK3CA Mutation",
+    "PAM50Basal-like" = "Basal-like",
+    "PAM50HER2-enriched" = "HER2-enriched",
+    "PAM50Luminal" = "Luminal"
+  )) %>%
+  mutate(significant = ifelse(p.value < 0.05, "Significant", "Not Significant"))
+
+# Save logistic regression model summary
+sink("data/logistic_model_summary.txt")
+cat("Logistic Regression Summary: Predicting NLS.Status from NF1.Status and Covariates\n\n")
+summary(logit_model_interaction_fixed)  # Use your final model object name here
+sink()
+
+
+# Create forest plot
+ggplot(logit_results, aes(x = reorder(term, estimate), y = estimate, ymin = conf.low, ymax = conf.high, color = significant)) +
+  geom_pointrange(size = 1.2) +  
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 1) +  
+  coord_flip() +  
+  scale_y_log10() +  
+  scale_color_manual(values = c("Significant" = "blue", "Not Significant" = "gray50")) +  
+  geom_text(aes(label = sprintf("p = %.3f", p.value)), hjust = -0.2, size = 5, color = "black") +  
+  labs(title = "Forest Plot of Logistic Regression Model",
+       x = "Predictor",
+       y = "Odds Ratio (95% CI)") +
+  theme_minimal(base_size = 16) +  
+  theme(
+    axis.text.y = element_text(face = "bold"),  
+    axis.title = element_text(face = "bold"),  
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 20),  
+    legend.position = "none"  
+  )
+
+```
+

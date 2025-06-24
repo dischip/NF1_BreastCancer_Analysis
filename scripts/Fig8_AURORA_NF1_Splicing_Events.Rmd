@@ -1,0 +1,348 @@
+---
+title: "AURORA rMATS NF1 Splicing Events Analysis"
+output: html_document
+date: "2025-06-13"
+---
+
+```{r setup, include=FALSE}
+
+library(GenomeInfoDb)
+library(maser)
+library(rtracklayer)
+library(dplyr)
+library(stats)
+library(ggpubr)
+library(knitr)
+library(survival)
+library(ggplot2)
+library(tibble)
+library(lubridate)
+library(ggsurvfit)
+library(gtsummary)
+library(tidycmprsk)
+library(readxl)
+library(glmmTMB)
+library(emmeans)
+library(xlsx)
+library(openxlsx)
+library(readr)
+
+# rMATS output was generated using the script located in `scripts/08_aurora_rMATS_command.sh`.
+# This script takes as input the primary and metastatic BAM file lists and generates the splice event files.
+# Load rMATS output directly using maser
+# Replace "data/rmats_output/" with your actual relative path
+splice_events_metadata <- maser(
+  dir = "data/aurora_rmats_output/",
+  groups = c("Metastasis", "Primary"),
+  ftype = "JCEC"  # Use "JC" if only junction counts were used
+)
+
+# Optional: save to RDS for faster loading next time
+saveRDS(splice_events_metadata, "data/mets_vs_primary.rds")
+
+splice_events_metadata <- readRDS("data/mets_vs_primary.rds")
+
+meta_filt <- filterByCoverage(splice_events_metadata, avg_reads = 5)
+meta_top <- topEvents(meta_filt, fdr = 0.05, deltaPSI = 0.1)
+meta_nf1 <- geneEvents(meta_filt, geneS = "NF1", fdr = 0.05, deltaPSI = 0.01)
+
+#Display table with significant splicing events
+maser::display(meta_nf1, "SE")
+maser::display(meta_nf1, "RI")
+maser::display(meta_nf1, "MXE")
+maser::display(meta_nf1, "A3SS")
+maser::display(meta_nf1, "A5SS")
+
+# Convert SE_PSI matrix to data frame
+se_psi_df <- as.data.frame(meta_nf1@SE_PSI)
+
+# Add a column for event IDs
+se_psi_df$Event_ID <- rownames(se_psi_df)
+
+# Reorder so Event_ID is the first column
+se_psi_df <- se_psi_df[, c("Event_ID", setdiff(names(se_psi_df), "Event_ID"))]
+
+# Transpose to match sample-first layout
+se_psi_t <- as.data.frame(t(se_psi_df[,-1]))  # Drop Event_ID before transpose
+
+# Set column names as event IDs
+colnames(se_psi_t) <- se_psi_df$Event_ID
+
+# Add sample IDs as a new column
+se_psi_t$Sample_ID <- rownames(se_psi_t)
+
+# Reorder columns: Sample_ID first
+se_psi_t <- se_psi_t[, c("Sample_ID", setdiff(names(se_psi_t), "Sample_ID"))]
+
+# Export to Excel
+write.xlsx(se_psi_t, file = "output/nf1_SE_psi.xlsx", rowNames = FALSE)
+
+# Read BAM file paths
+met_bam_paths <- read_file("data/aurora_met_tumor_bams.txt") %>%
+  strsplit(",") %>% unlist()
+
+primary_bam_paths <- read_file("data/aurora_primary_tumor_bams.txt") %>%
+  strsplit(",") %>% unlist()
+
+# Extract SRR IDs
+met_srr <- unique(gsub(".*/(SRR\\d+)/.*", "\\1", met_bam_paths))[1:76]
+primary_srr <- unique(gsub(".*/(SRR\\d+)/.*", "\\1", primary_bam_paths))[1:40]
+
+# Combine in correct order
+all_srr <- c(met_srr, primary_srr)
+
+# Check length matches
+if (length(all_srr) != nrow(se_psi_t)) stop("Sample count mismatch!")
+
+# Replace Sample_IDs
+se_psi_t$Sample_ID <- all_srr
+
+nf1_SE_psi <- se_psi_t
+
+nf1_SE_psi <- read_excel("output/nf1_SE_psi.xlsx")
+
+
+```
+
+```{r NF1 NLS Skipping ID117781 glmm, include=FALSE}
+
+aurora_meta <- read_excel("data/aurora_metadata.xlsx")
+
+aurora_meta <- left_join(nf1_SE_psi, aurora_meta,  c("Sample_ID" = "SRR Run Identifier") )
+
+
+# Step 1: Create a new column for deltaNLS_percent
+aurora_meta <- aurora_meta %>%
+  mutate(deltaNLS_percent = (1 - ID_117781) * 100)
+
+
+#glmmTMB
+fit_781=glmmTMB(deltaNLS_percent/100 ~ Sample_Type.y + (1|Patient), data = aurora_meta, family = beta_family())
+
+eme_781 <- emmeans(fit_781, pairwise~Sample_Type.y, type = "response")
+emea_781 <- as.data.frame(eme_781$contrasts)
+emeb_781 <- as.data.frame(eme_781$emmeans)
+emeb_781$percent <- emeb_781$response*100
+
+emeb_781$Sample_Type.y <- factor(emeb_781$Sample_Type.y, levels = c("Primary", "Metastasis"))
+
+ggplot(data = emeb_781, aes(x = Sample_Type.y, y = percent, colors())) +
+  geom_errorbar(aes(ymin=asymp.LCL*100, ymax=asymp.UCL*100), width=0, size=25, alpha=.3) +
+  geom_errorbar(aes(ymin = percent-.15, ymax = percent+.15), width=0, size=25, alpha=.5) +
+  geom_point(data = aurora_meta, aes(x = Sample_Type.y, y = deltaNLS_percent, color = Sample_Type.y), size = 1.5, position = position_jitter(height = 0, width = .12)) +
+  scale_color_manual(values = c("Primary" = "black", "Metastasis" = "black")) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 12, colour = "black", margin = margin(t = 5)), axis.text.x=element_text(angle = 45, hjust = 1, size = 12, colour = "black"), axis.title.y = element_text(size = 12, colour = "black", margin = margin(r = 7)), axis.text.y = element_text(size = 12, colour = "black"), legend.text = element_text(size = 12, color = "black"), legend.title = element_text(size = 12, color = "black"), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), legend.position = "none") +
+  labs(y = "NLS Percent Spliced In", x = "Tissue Type")
+
+
+```
+
+```{r NF1 NLS Skipping ID516405 glmm, include=FALSE}
+
+
+# Step 1: Create a new column for deltaNLS_percent
+NLS_516405_meta <- aurora_meta %>%
+  mutate(NLS05_percent = (1 - ID_516405) * 100)
+
+# Replace 0s with a small positive value and 1s with slightly less than 1
+NLS_516405_meta <- NLS_516405_meta %>%
+  mutate(ID_516405_adj = case_when(
+    ID_516405 == 0 ~ 0.000001,
+    ID_516405 == 1 ~ 0.999999,
+    TRUE ~ ID_516405
+  ))
+
+fit_516405=glmmTMB(ID_516405_adj ~ Sample_Type.y + (1|Patient), data = NLS_516405_meta, family = beta_family())
+
+eme_516405 <- emmeans(fit_516405, pairwise~Sample_Type.y, type = "response")
+emea_516405 <- as.data.frame(eme_516405$contrasts)
+emeb_516405 <- as.data.frame(eme_516405$emmeans)
+emeb_516405$percent <- emeb_516405$response*100
+
+emeb_516405$Sample_Type.y <- factor(emeb_516405$Sample_Type.y, levels = c("Primary", "Metastasis"))
+
+#Plot NLS 516405 Splicing 
+ggplot(NLS_516405_meta, aes(x = Sample_Type.x, y = NLS05_percent)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = "grey") +  # Fill boxplot with grey
+  geom_jitter(width = 0.2, size = 1.5, alpha = 0.6) +  # Color points based on Increased column
+  # geom_line(data = subset(df_diff, Increased == "NF1 ∆NLS Expression"), 
+  #           aes(group = Patient), color = "blue", size = 0.5, alpha = 0.7) +  # Add lines for increased samples
+  labs(
+      x = "Tumor Type",
+      y = "% of NF1 NLS PE1 transcript",
+      title = "Expression of NF1 NLS PE1 Transcript in Tumors",
+      color = "Transcript Expression"  # Change legend title
+  ) +
+  scale_x_discrete(limits = c("Primary", "Metastatic")) +  # Reorder x-axis categories
+  scale_color_manual(values = c("Increased" = "blue", "Not Increased" = "black")) +  # Set colors for points
+  theme_minimal() +
+  theme(
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      axis.line = element_line(color = "black"),  # Add black lines to axes
+      # axis.text.x = element_text(angle = 45, hjust = 1, size = 12),  # Rotate x-axis labels to 45 degrees
+      axis.text.y = element_text(size = 12),  # Increase y-axis text size
+      axis.title.x = element_text(size = 14),  # Increase x-axis title size
+      axis.title.y = element_text(size = 14),  # Increase y-axis title size
+      plot.title = element_text(size = 16, hjust = 0.5)  # Increase title font size and center it
+  )
+
+
+
+```
+
+```{r NF1 NLS Skipping ID516406 glmm, include=FALSE}
+
+# Step 1: Create a new column for deltaNLS_percent
+NLS_516406_meta <- aurora_meta %>%
+  mutate(NLS06_percent = (1 - ID_516406) * 100)
+
+# Replace 0s with a small positive value and 1s with slightly less than 1
+NLS_516406_meta <- NLS_516406_meta %>%
+  mutate(ID_516406_adj = case_when(
+    ID_516406 == 0 ~ 0.000001,
+    ID_516406 == 1 ~ 0.999999,
+    TRUE ~ ID_516406
+  ))
+
+fit_516406=glmmTMB(ID_516406_adj ~ Sample_Type.y + (1|Patient), data = NLS_516406_meta, family = beta_family())
+
+eme_516406 <- emmeans(fit_516406, pairwise~Sample_Type.y, type = "response")
+emea_516406 <- as.data.frame(eme_516406$contrasts)
+emeb_516406 <- as.data.frame(eme_516406$emmeans)
+emeb_516406$percent <- emeb_516406$response*100
+
+emeb_516406$Sample_Type.y <- factor(emeb_516406$Sample_Type.y, levels = c("Primary", "Metastasis"))
+
+#Plot NLS 516406 Splicing 
+ggplot(NLS_516406_meta, aes(x = Sample_Type.x, y = NLS06_percent)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = "grey") +  # Fill boxplot with grey
+  geom_jitter(width = 0.2, size = 1.5, alpha = 0.6) +  # Color points based on Increased column
+  # geom_line(data = subset(df_diff, Increased == "NF1 ∆NLS Expression"), 
+  #           aes(group = Patient), color = "blue", size = 0.5, alpha = 0.7) +  # Add lines for increased samples
+  labs(
+      x = "Tumor Type",
+      y = "% of NF1 NLS PE2 transcript",
+      title = "Expression of NF1 NLS PE2 Transcript in Tumors",
+      color = "Transcript Expression"  # Change legend title
+  ) +
+  scale_x_discrete(limits = c("Primary", "Metastatic")) +  # Reorder x-axis categories
+  scale_color_manual(values = c("Increased" = "blue", "Not Increased" = "black")) +  # Set colors for points
+  theme_minimal() +
+  theme(
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      axis.line = element_line(color = "black"),  # Add black lines to axes
+      # axis.text.x = element_text(angle = 45, hjust = 1, size = 12),  # Rotate x-axis labels to 45 degrees
+      axis.text.y = element_text(size = 12),  # Increase y-axis text size
+      axis.title.x = element_text(size = 14),  # Increase x-axis title size
+      axis.title.y = element_text(size = 14),  # Increase y-axis title size
+      plot.title = element_text(size = 16, hjust = 0.5)  # Increase title font size and center it
+  )
+
+
+```
+
+```{r NF1 NLS Skipping ID516410 glmm, include=FALSE}
+
+# Step 1: Create a new column for deltaNLS_percent
+NLS_516410_meta <- aurora_meta %>%
+  mutate(NLS10_percent = (1 - ID_516410) * 100)
+
+# Replace 0s with a small positive value and 1s with slightly less than 1
+NLS_516410_meta <- NLS_516410_meta %>%
+  mutate(ID_516410_adj = case_when(
+    ID_516410 == 0 ~ 0.000001,
+    ID_516410 == 1 ~ 0.999999,
+    TRUE ~ ID_516410
+  ))
+
+fit_516410=glmmTMB(ID_516410_adj ~ Sample_Type.y + (1|Patient), data = NLS_516410_meta, family = beta_family())
+
+eme_516410 <- emmeans(fit_516410, pairwise~Sample_Type.y, type = "response")
+emea_516410 <- as.data.frame(eme_516410$contrasts)
+emeb_516410 <- as.data.frame(eme_516410$emmeans)
+emeb_516410$percent <- emeb_516410$response*100
+
+emeb_516410$Sample_Type.y <- factor(emeb_516410$Sample_Type.y, levels = c("Primary", "Metastasis"))
+
+#Plot NLS 516410 Splicing 
+ggplot(NLS_516410_meta, aes(x = Sample_Type.x, y = NLS10_percent)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = "grey") +  # Fill boxplot with grey
+  geom_jitter(width = 0.2, size = 1.5, alpha = 0.6) +  # Color points based on Increased column
+  # geom_line(data = subset(df_diff, Increased == "NF1 ∆NLS Expression"), 
+  #           aes(group = Patient), color = "blue", size = 0.5, alpha = 0.7) +  # Add lines for increased samples
+  labs(
+      x = "Tumor Type",
+      y = "% of NF1 NLS PE3 transcript",
+      title = "Expression of NF1 NLS PE3 Transcript in Tumors",
+      color = "Transcript Expression"  # Change legend title
+  ) +
+  scale_x_discrete(limits = c("Primary", "Metastatic")) +  # Reorder x-axis categories
+  scale_color_manual(values = c("Increased" = "blue", "Not Increased" = "black")) +  # Set colors for points
+  theme_minimal() +
+  theme(
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      axis.line = element_line(color = "black"),  # Add black lines to axes
+      # axis.text.x = element_text(angle = 45, hjust = 1, size = 12),  # Rotate x-axis labels to 45 degrees
+      axis.text.y = element_text(size = 12),  # Increase y-axis text size
+      axis.title.x = element_text(size = 14),  # Increase x-axis title size
+      axis.title.y = element_text(size = 14),  # Increase y-axis title size
+      plot.title = element_text(size = 16, hjust = 0.5)  # Increase title font size and center it
+  )
+
+```
+
+```{r NF1 GRD Skipping ID117748 glmm, include=FALSE}
+
+# Step 1: Create a new column for deltaNLS_percent
+GRD_117748_meta <- aurora_meta %>%
+  mutate(GRD_117748_percent = (1 - ID_117748) * 100)
+
+# Replace 0s with a small positive value and 1s with slightly less than 1
+GRD_117748_meta <- GRD_117748_meta %>%
+  mutate(ID_117748_adj = case_when(
+    ID_117748 == 0 ~ 0.000001,
+    ID_117748 == 1 ~ 0.999999,
+    TRUE ~ ID_117748
+  ))
+
+fit_117748=glmmTMB(ID_117748_adj ~ Sample_Type.y + (1|Patient), data = GRD_117748_meta, family = beta_family())
+
+eme_117748 <- emmeans(fit_117748, pairwise~Sample_Type.y, type = "response")
+emea_117748 <- as.data.frame(eme_117748$contrasts)
+emeb_117748 <- as.data.frame(eme_117748$emmeans)
+emeb_117748$percent <- emeb_117748$response*100
+
+emeb_117748$Sample_Type.y <- factor(emeb_117748$Sample_Type.y, levels = c("Primary", "Metastasis"))
+
+#Plot GRD 117748 Splicing 
+ggplot(GRD_117748_meta, aes(x = Sample_Type.x, y = GRD_117748_percent)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = "grey") +  # Fill boxplot with grey
+  geom_jitter(width = 0.2, size = 1.5, alpha = 0.6) +  # Color points based on Increased column
+  # geom_line(data = subset(df_diff, Increased == "NF1 ∆NLS Expression"), 
+  #           aes(group = Patient), color = "blue", size = 0.5, alpha = 0.7) +  # Add lines for increased samples
+  labs(
+      x = "Tumor Type",
+      y = "% of NF1 GRD 31 SE transcripts",
+      title = "Expression of NF1 GRD 31 SE Transcript in Tumors",
+      color = "Transcript Expression"  # Change legend title
+  ) +
+  scale_x_discrete(limits = c("Primary", "Metastatic")) +  # Reorder x-axis categories
+  scale_color_manual(values = c("Increased" = "blue", "Not Increased" = "black")) +  # Set colors for points
+  theme_minimal() +
+  theme(
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      axis.line = element_line(color = "black"),  # Add black lines to axes
+      # axis.text.x = element_text(angle = 45, hjust = 1, size = 12),  # Rotate x-axis labels to 45 degrees
+      axis.text.y = element_text(size = 12),  # Increase y-axis text size
+      axis.title.x = element_text(size = 14),  # Increase x-axis title size
+      axis.title.y = element_text(size = 14),  # Increase y-axis title size
+      plot.title = element_text(size = 16, hjust = 0.5)  # Increase title font size and center it
+  )
+
+
+```

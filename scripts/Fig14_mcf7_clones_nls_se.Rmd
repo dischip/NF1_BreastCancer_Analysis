@@ -1,0 +1,77 @@
+---
+title: "mcf7 nf1 nls se with treatment"
+output: html_document
+date: "2025-06-23"
+---
+
+```{r MASER Objects, include=FALSE}
+
+library(devtools)
+library(maser)
+library(rtracklayer)
+library(dplyr)
+
+VePath <- ("/Volumes/projects_primary/steensma/Genomics_Core/PR001359/rmats_analysis/M7EVVe_vs_M733Ve/jcec/")
+E2Path <- ("/Volumes/projects_primary/steensma/Genomics_Core/PR001359/rmats_analysis/M7EVE2_vs_M733E2/jcec/")
+TamPath <- ("/Volumes/projects_primary/steensma/Genomics_Core/PR001359/rmats_analysis/M7EVTam_vs_M733Tam/jcec/")
+CobiPath <- ("/Volumes/projects_primary/steensma/Genomics_Core/PR001359/rmats_analysis/M7EVCob_vs_M733Cob/jcec/")
+
+Ve <- maser(VePath, c("EV", "C33"), ftype = "JCEC")
+E2 <- maser(E2Path, c("EV", "C33"), ftype = "JCEC")
+Tam <- maser(TamPath, c("EV", "C33"), ftype = "JCEC")
+Cobi <- maser(CobiPath, c("EV", "C33"), ftype = "JCEC")
+
+Ve_filt <- filterByCoverage(Ve, avg_reads = 5)
+E2_filt <- filterByCoverage(E2, avg_reads = 5)
+Tam_filt <- filterByCoverage(Tam, avg_reads = 5)
+Cobi_filt <- filterByCoverage(Cobi, avg_reads = 5)
+
+Ve_top <- topEvents(Ve_filt, fdr = 0.05, deltaPSI = 0.05)
+E2_top <- topEvents(E2_filt, fdr = 0.05, deltaPSI = 0.05)
+Tam_top <- topEvents(Tam_filt, fdr = 0.05, deltaPSI = 0.05)
+Cobi_top <- topEvents(Cobi_filt, fdr = 1, deltaPSI = 0.00)
+
+Ve_top
+E2_top
+Tam_top
+Cobi_top
+
+Ve_nf1 <- geneEvents(Ve_top, geneS = "NF1", fdr = 0.05, deltaPSI = 0.05)
+E2_nf1 <- geneEvents(E2_top, geneS = "NF1", fdr = 0.05, deltaPSI = 0.05)
+Tam_nf1 <- geneEvents(Tam_top, geneS = "NF1", fdr = 0.05, deltaPSI = 0.05)
+Cobi_nf1 <- geneEvents(Cobi_top, geneS = "NF1", fdr = 1, deltaPSI = 0.00)
+
+# Convert SE_PSI matrix to data frame
+Ve_nf1_df <- as.data.frame(Ve_nf1@SE_PSI)
+E2_nf1_df <- as.data.frame(E2_nf1@SE_PSI)
+Tam_nf1_df <- as.data.frame(Tam_nf1@SE_PSI)
+Cobi_nf1_df <- as.data.frame(Cobi_nf1@SE_PSI)
+
+# Add a column for event IDs
+Ve_nf1_df$Event_ID <- rownames(Ve_nf1_df)
+E2_nf1_df$Event_ID <- rownames(E2_nf1_df)
+Tam_nf1_df$Event_ID <- rownames(Tam_nf1_df)
+Cobi_nf1_df$Event_ID <- rownames(Cobi_nf1_df)
+
+# Reorder so Event_ID is the first column
+Ve_nf1_df <- Ve_nf1_df[, c("Event_ID", setdiff(names(Ve_nf1_df), "Event_ID"))]
+E2_nf1_df <- E2_nf1_df[, c("Event_ID", setdiff(names(E2_nf1_df), "Event_ID"))]
+Tam_nf1_df <- Tam_nf1_df[, c("Event_ID", setdiff(names(Tam_nf1_df), "Event_ID"))]
+Cobi_nf1_df <- Cobi_nf1_df[, c("Event_ID", setdiff(names(Cobi_nf1_df), "Event_ID"))]
+
+# Transpose to match sample-first layout
+Ve_nf1_t <- as.data.frame(t(Ve_nf1_df[,-1]))  # Drop Event_ID before transpose
+E2_nf1_t <- as.data.frame(t(E2_nf1_df[,-1]))  
+Tam_nf1_t <- as.data.frame(t(Tam_nf1_df[,-1]))  
+Cobi_nf1_t <- as.data.frame(t(Cobi_nf1_df[,-1]))  
+
+
+# Set column names as event IDs
+colnames(Ve_nf1_t) <- Ve_nf1_df$Event_ID
+colnames(E2_nf1_t) <- E2_nf1_df$Event_ID
+colnames(Tam_nf1_t) <- Tam_nf1_df$Event_ID
+colnames(Cobi_nf1_t) <- Cobi_nf1_df$Event_ID
+
+
+
+```

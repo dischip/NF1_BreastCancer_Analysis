@@ -1,0 +1,161 @@
+---
+title: "MCF7 NLS Clones rMATS Analysis"
+output: html_document
+date: "2025-06-16"
+---
+
+```{r MASER Objects, include=FALSE}
+
+library(devtools)
+library(maser)
+library(rtracklayer)
+library(dplyr)
+
+EV_E2Path <- ("data/rmats_output/mcf7_nls/M7EVVe_vs_M7EVE2/jcec/")
+EV_TamPath <- ("data/rmats_output/mcf7_nls/M7EVVe_vs_M7EVTam/jcec/")
+EV_CobiPath <- ("data/rmats_output/mcf7_nls/M7EVVe_vs_M7EVCob/jcec/")
+
+EV_E2 <- maser(EV_E2Path, c("Vehicle", "E2"), ftype = "JCEC")
+EV_Tam <- maser(EV_TamPath, c("Vehicle", "Tamoxifen"), ftype = "JCEC")
+EV_Cobi <- maser(EV_CobiPath, c("Vehicle", "Cobimetinib"), ftype = "JCEC")
+
+EV_E2_filt <- filterByCoverage(EV_E2, avg_reads = 5)
+EV_Tam_filt <- filterByCoverage(EV_Tam, avg_reads = 5)
+EV_Cobi_filt <- filterByCoverage(EV_Cobi, avg_reads = 5)
+
+
+EV_E2_top <- topEvents(EV_E2_filt, fdr = 0.05, deltaPSI = 0.05)
+EV_Tam_top <- topEvents(EV_Tam_filt, fdr = 0.05, deltaPSI = 0.05)
+EV_Cobi_top <- topEvents(EV_Cobi_filt, fdr = 0.05, deltaPSI = 0.05)
+
+
+EV_E2_top
+EV_Tam_top
+EV_Cobi_top
+
+#Clone 33
+
+C33_E2Path <- ("data/rmats_output/mcf7_nls/M733Ve_vs_M733E2/jcec/")
+C33_TamPath <- ("data/rmats_output/mcf7_nls/M733Ve_vs_M733Tam/jcec/")
+C33_CobiPath <- ("data/rmats_output/mcf7_nls/M733Ve_vs_M733Cob/jcec/")
+
+C33_E2 <- maser(C33_E2Path, c("Vehicle", "E2"), ftype = "JCEC")
+C33_Tam <- maser(C33_TamPath, c("Vehicle", "Tamoxifen"), ftype = "JCEC")
+C33_Cobi <- maser(C33_CobiPath, c("Vehicle", "Cobimetinib"), ftype = "JCEC")
+
+C33_E2_filt <- filterByCoverage(C33_E2, avg_reads = 5)
+C33_Tam_filt <- filterByCoverage(C33_Tam, avg_reads = 5)
+C33_Cobi_filt <- filterByCoverage(C33_Cobi, avg_reads = 5)
+
+
+C33_E2_top <- topEvents(C33_E2_filt, fdr = 0.05, deltaPSI = 0.05)
+C33_Tam_top <- topEvents(C33_Tam_filt, fdr = 0.05, deltaPSI = 0.05)
+C33_Cobi_top <- topEvents(C33_Cobi_filt, fdr = 0.05, deltaPSI = 0.05)
+
+
+C33_E2_top
+C33_Tam_top
+C33_Cobi_top
+
+
+```
+
+#Plot Splicing Events
+``` {r Splicing Events}
+
+# Load required libraries
+library(maser)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(viridis)
+
+# Define list of Maser objects
+maser_list <- list(
+  EV_E2 = EV_E2_top,
+  C33_E2 = C33_E2_top,
+  EV_Tam = EV_Tam_top,
+  C33_Tam = C33_Tam_top,
+  EV_Cobi = EV_Cobi_top,
+  C33_Cobi = C33_Cobi_top
+)
+
+# Function to extract counts per splice type
+extract_splicing_counts <- function(name, maser_obj) {
+  data.frame(
+    Treatment = name,
+    A3SS = length(maser_obj@A3SS_events$ID),
+    A5SS = length(maser_obj@A5SS_events$ID),
+    SE   = length(maser_obj@SE_events$ID),
+    RI   = length(maser_obj@RI_events$ID),
+    MXE  = length(maser_obj@MXE_events$ID)
+  )
+}
+
+# Apply the function across all maser objects
+counts_df <- bind_rows(
+  Map(extract_splicing_counts, names(maser_list), maser_list)
+)
+
+# Pivot to long format
+counts_long <- counts_df %>%
+  pivot_longer(cols = -Treatment, names_to = "SpliceType", values_to = "Count")
+
+# Add metadata: Cell line and treatment group
+counts_long <- counts_long %>%
+  mutate(
+    CellLine = ifelse(str_detect(Treatment, "C33"), "C33", "EV"),
+    TreatmentGroup = str_remove(Treatment, "^(C33_|EV_)"),
+    TreatmentGroup = recode(TreatmentGroup,
+                            E2 = "E2",
+                            Tam = "Tamoxifen",
+                            Cobi = "Cobimetinib"),
+    TreatmentGroup = factor(TreatmentGroup, levels = c("E2", "Tamoxifen", "Cobimetinib")),
+    Group = paste(CellLine, TreatmentGroup, sep = "\n")  # label below bars
+  )
+
+# Set stacking order: SE at bottom, A3SS at top
+counts_long$SpliceType <- factor(
+  counts_long$SpliceType,
+  levels = c("A3SS", "A5SS", "MXE", "RI", "SE")
+)
+
+
+# Plot
+ggplot(counts_long, aes(x = Group, y = Count, fill = SpliceType)) +
+  geom_bar(stat = "identity", width = 0.7) +
+
+  # Titles and labels
+  labs(
+    title = "Splicing Event Counts by Treatment and Cell Line",
+    x = "Treatment and Cell Line",
+    y = "Number of Splicing Events",
+    fill = "Splice Type"
+  ) +
+  
+  scale_y_continuous(
+  limits = c(0, 3000),
+  breaks = seq(0, 3000, by = 500),
+  expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Viridis color scale
+  scale_fill_viridis_d(option = "D", direction = -1, drop = FALSE) +
+
+  # Styling
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.text.x = element_text(size = 11, vjust = 1),
+    axis.text.y = element_text(size = 11),
+    axis.title.x = element_text(size = 12, face = "bold"),
+    axis.title.y = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "right"
+  )
+
+
+
+```

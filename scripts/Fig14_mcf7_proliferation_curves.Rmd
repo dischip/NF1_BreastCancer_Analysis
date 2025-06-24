@@ -1,0 +1,108 @@
+---
+title: "MCF7 NF1 NLS Incucyte Analysis"
+output: html_document
+date: "2024-11-22"
+---
+
+```{r setup, include=FALSE}
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(lme4)
+library(emmeans)
+library(readxl)
+
+
+incucyte_meta <- read_excel("data/incucyte_metadata.xlsx")
+
+# Reshape the data for values
+values_long <- incucyte_meta %>%
+  pivot_longer(
+    cols = matches("^(EV|33)_(media|Vehicle|E2|Tamoxifen|SERD|Cobimetinib)$"), # Match only value columns
+    names_to = c("Group", "Treatment"),
+    names_sep = "_",
+    values_to = "Value"
+  )
+
+# Reshape the data for standard deviations
+sem_long <- incucyte_meta %>%
+  pivot_longer(
+    cols = matches("^(EV|33)_(media|Vehicle|E2|Tamoxifen|SERD|Cobimetinib)_SEM$"), # Match only SD columns
+    names_to = c("Group", "Treatment"),
+    names_pattern = "^(EV|33)_(media|Vehicle|E2|Tamoxifen|SERD|Cobimetinib)_SEM$",
+    values_to = "SEM"
+  )
+
+# Merge the values and SDs
+long_data <- values_long %>%
+  left_join(sem_long, by = c("Time", "Group", "Treatment"))
+
+# Filter out "Media" and "SERD" from Treatment before analysis
+long_data_filtered <- long_data %>%
+  filter(!Treatment %in% c("Media", "SERD"))
+
+# Filter data for the time range 24 to 144 hours
+long_data <- long_data %>%
+  filter(Time >= 24, Time <= 144)
+
+# Filter out "Media" and "SERD" from Treatment before analysis
+long_data <- long_data %>%
+  filter(!Treatment %in% c("Media", "SERD"))
+
+# Reorder the Treamtent Variables
+long_data$Treatment <- factor(long_data$Treatment, levels = c("Vehicle", "E2", "Tamoxifen", "Cobimetinib"))
+
+logit <- function(p) {
+  log(p / (1 - p))
+}
+
+# Fit a mixed-effects model
+model <- lmer(Value ~ Group * Treatment * Time + (1 | Time), data = long_data)
+
+# Summary of the model
+summary(model)
+
+sink("results/model_summary.txt")
+summary(model)
+sink()
+
+# Perform ANOVA to test significance
+anova(model)
+
+sink("results/model_anova.txt")
+anova(model)
+sink()
+
+posthoc <- emmeans(model, pairwise ~ Group * Treatment, adjust = "tukey")
+summary(posthoc)
+
+# Save emmeans
+# emmeans_df <- as.data.frame(posthoc$emmeans)
+# write.csv(emmeans_df, "posthoc_emmeans.csv", row.names = FALSE)
+
+# Save pairwise contrasts
+# contrasts_df <- as.data.frame(posthoc$contrasts)
+# write.csv(contrasts_df, "posthoc_contrasts.csv", row.names = FALSE)
+
+
+# Plot the data
+ggplot(long_data, aes(x = Time, y = Value, color = Group)) +
+  geom_line(size = 1) + # Lines for trends
+  geom_point() + # Points for data points
+  geom_errorbar(aes(ymin = Value - SEM, ymax = Value + SEM), width = 0.2) + # Add error bars
+  facet_wrap(~Treatment, scales = "free_y") + # Create separate plots for each treatment
+  labs(
+    title = "Comparison of EV and 33 Across Treatments",
+    x = "Time",
+    y = "Values",
+    color = "Group"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14),
+    legend.position = "top"
+  )
+
+
+```

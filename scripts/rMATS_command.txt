@@ -1,0 +1,11 @@
+rmats.py \
+  --b1 bam_lists/bams_list_group1.txt \
+  --b2 bam_lists/bams_list_group2.txt \
+  --gtf reference/gencode.v38.annotation.gtf \
+  -t paired \
+  --readLength 50 \
+  --variable-read-length \
+  --nthread 64 \
+  --novelSS \
+  --od data/ \
+  --tmp tmp/

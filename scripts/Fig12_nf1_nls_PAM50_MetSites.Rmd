@@ -1,0 +1,323 @@
+---
+title: "NF1 NLS AURORA PAM50 & Mets"
+output: html_document
+date: "2025-06-23"
+---
+
+```{r setup, include=FALSE}
+
+library(GenomeInfoDb)
+library(maser)
+library(rtracklayer)
+library(devtools)
+library(dplyr)
+library(stats)
+library(ggpubr)
+library(plyr)
+library(knitr)
+library(survival)
+library(ggplot2)
+library(tibble)
+library(lubridate)
+library(ggsurvfit)
+library(gtsummary)
+library(tidycmprsk)
+library(readxl)
+library(glmmTMB)
+library(emmeans)
+library(xlsx)
+library(openxlsx)
+library(readr)
+
+# Load rMATS output directly using maser
+# Replace "data/rmats_output/" with your actual relative path
+splice_events_metadata <- maser(
+  dir = "data/aurora_rmats_output/",
+  groups = c("Metastasis", "Primary"),
+  ftype = "JCEC"  # Use "JC" if only junction counts were used
+)
+
+# Optional: save to RDS for faster loading next time
+saveRDS(splice_events_metadata, "data/mets_vs_primary.rds")
+
+splice_events_metadata <- readRDS("data/mets_vs_primary.rds")
+
+meta_filt <- filterByCoverage(splice_events_metadata, avg_reads = 5)
+meta_top <- topEvents(meta_filt, fdr = 0.05, deltaPSI = 0.1)
+meta_nf1 <- geneEvents(meta_filt, geneS = "NF1", fdr = 0.05, deltaPSI = 0.01)
+
+#Display table with significant splicing events
+maser::display(meta_nf1, "SE")
+maser::display(meta_nf1, "RI")
+maser::display(meta_nf1, "MXE")
+maser::display(meta_nf1, "A3SS")
+maser::display(meta_nf1, "A5SS")
+
+# Convert SE_PSI matrix to data frame
+se_psi_df <- as.data.frame(meta_nf1@SE_PSI)
+
+# Add a column for event IDs
+se_psi_df$Event_ID <- rownames(se_psi_df)
+
+# Reorder so Event_ID is the first column
+se_psi_df <- se_psi_df[, c("Event_ID", setdiff(names(se_psi_df), "Event_ID"))]
+
+# Transpose to match sample-first layout
+se_psi_t <- as.data.frame(t(se_psi_df[,-1]))  # Drop Event_ID before transpose
+
+# Set column names as event IDs
+colnames(se_psi_t) <- se_psi_df$Event_ID
+
+# Add sample IDs as a new column
+se_psi_t$Sample_ID <- rownames(se_psi_t)
+
+# Reorder columns: Sample_ID first
+se_psi_t <- se_psi_t[, c("Sample_ID", setdiff(names(se_psi_t), "Sample_ID"))]
+
+# Export to Excel
+write.xlsx(se_psi_t, file = "output/nf1_SE_psi.xlsx", rowNames = FALSE)
+
+# Read BAM file paths
+met_bam_paths <- read_file("data/aurora_met_tumor_bams.txt") %>%
+  strsplit(",") %>% unlist()
+
+primary_bam_paths <- read_file("data/aurora_primary_tumor_bams.txt") %>%
+  strsplit(",") %>% unlist()
+
+# Extract SRR IDs
+met_srr <- unique(gsub(".*/(SRR\\d+)/.*", "\\1", met_bam_paths))[1:76]
+primary_srr <- unique(gsub(".*/(SRR\\d+)/.*", "\\1", primary_bam_paths))[1:40]
+
+# Combine in correct order
+all_srr <- c(met_srr, primary_srr)
+
+# Check length matches
+if (length(all_srr) != nrow(se_psi_t)) stop("Sample count mismatch!")
+
+# Replace Sample_IDs
+se_psi_t$Sample_ID <- all_srr
+
+nf1_SE_psi <- se_psi_t
+
+nf1_SE_psi <- read_excel("output/nf1_SE_psi.xlsx")
+
+
+```
+
+```{r glmm, include=FALSE}
+
+aurora_meta <- read_excel("data/aurora_metadata.xlsx")
+
+aurora_meta <- left_join(nf1_SE_psi, aurora_meta,  c("Sample_ID" = "SRR Run Identifier") )
+
+
+# Step 1: Create a new column for deltaNLS_percent
+aurora_meta <- aurora_meta %>%
+  mutate(deltaNLS_percent = (1 - ID_117781) * 100)
+
+```
+
+```{r PAM50 NLS PSI, include=FALSE}
+
+#glmmTMB
+fit_781_PAM50=glmmTMB(ID_117781 ~ `PAM50 Call` + (1|Sample_Type.x) + (1|Patient), data = aurora_meta, family = beta_family())
+
+eme_781_PAM50 <- emmeans(fit_781_PAM50, pairwise~`PAM50 Call` , type = "response")
+emea_781_PAM50 <- as.data.frame(eme_781_PAM50$contrasts)
+emeb_781_PAM50 <- as.data.frame(eme_781_PAM50$emmeans)
+emeb_781_PAM50$percent <- emeb_781_PAM50$response*100
+
+emeb_781_PAM50$`PAM50 Call` <- factor(emeb_781_PAM50$`PAM50 Call`, levels = c("Basal", "LumA", "LumB", "Her2", "Normal", "Claudin"))
+
+
+ggplot(aurora_meta, aes(x = `PAM50 Call`, y = deltaNLS_percent)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = "grey") +  # Fill boxplot with grey
+  geom_jitter(aes(color = Sample_Type.x), width = 0.2, size = 1.5, alpha = 0.6) +  # Add jittered points with colors based on SampleType.x
+  labs(
+      x = "PAM50 Subtype",
+      y = "% of NF1 NF1 NLS SE transcript",
+      title = "PAM50",
+      color = "Sample Type"  # Update legend title to reflect color mapping
+  ) +
+  scale_x_discrete(limits = c("LumA", "LumB", "Her2", "Basal", "Normal", "Claudin")) +  # Reorder x-axis categories
+  scale_color_manual(values = c("Primary" = "black", "Metastatic" = "blue")) +  # Set custom colors for SampleType.x
+  theme_minimal() +
+  theme(
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      axis.line = element_line(color = "black"),  # Add black lines to axes
+      # axis.text.x = element_text(angle = 45, hjust = 1, size = 12),  # Rotate x-axis labels to 45 degrees
+      axis.text.y = element_text(size = 12),  # Increase y-axis text size
+      axis.title.x = element_text(size = 14),  # Increase x-axis title size
+      axis.title.y = element_text(size = 14),  # Increase y-axis title size
+      plot.title = element_text(size = 16, hjust = 0.5)  # Increase title font size and center it
+  )
+
+# Filter out "Normal" and "Claudin" from the dataset
+filtered_data <- aurora_meta %>% 
+  filter(!`PAM50 Call` %in% c("Normal", "Claudin"))
+
+# Generate the plot with the filtered data
+ggplot(filtered_data, aes(x = `PAM50 Call`, y = deltaNLS_percent, fill = Sample_Type.x)) +
+  geom_boxplot(outlier.shape = NA, color = "black", position = position_dodge(width = 0.8)) +  # Separate boxplots by Sample_Type.x
+  geom_jitter(aes(color = Sample_Type.x), size = 1.5, alpha = 0.6, position = position_dodge(width = 0.8)) +  # Jitter points within each group
+  labs(
+      x = "PAM50 Subtype",
+      y = "% of NF1 NLS SE transcript",
+      title = "PAM50",
+      color = "Sample Type",  # Update legend title to reflect color mapping
+      fill = "Sample Type"    # Update legend title for fill as well
+  ) +
+  scale_x_discrete(limits = c("LumA", "LumB", "Her2", "Basal")) +  # Reorder x-axis categories
+  scale_fill_manual(values = c("Primary" = "black", "Metastatic" = "blue")) +  # Set custom fill colors for SampleType.x
+  scale_color_manual(values = c("Primary" = "black", "Metastatic" = "blue")) +  # Set custom colors for points
+  theme_minimal() +
+  theme(
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      axis.line = element_line(color = "black"),  # Add black lines to axes
+      axis.text.y = element_text(size = 12),  # Increase y-axis text size
+      axis.title.x = element_text(size = 14),  # Increase x-axis title size
+      axis.title.y = element_text(size = 14),  # Increase y-axis title size
+      plot.title = element_text(size = 16, hjust = 0.5)  # Increase title font size and center it
+  )
+
+
+# Create a new column to combine LumA and LumB as "Luminal"
+filtered_data <- filtered_data %>%
+  mutate(`PAM50 Group` = ifelse(`PAM50 Call` %in% c("LumA", "LumB"), "Luminal", `PAM50 Call`))
+
+# Generate the plot using PAM50_Group instead of PAM50_Call
+ggplot(filtered_data, aes(x = `PAM50 Group`, y = deltaNLS_percent, fill = Sample_Type.x)) +
+  geom_boxplot(outlier.shape = NA, color = "black", position = position_dodge(width = 0.8)) +  # Separate boxplots by Sample_Type.x
+  geom_jitter(aes(color = Sample_Type.x), size = 1.5, alpha = 0.6, position = position_dodge(width = 0.8)) +  # Jitter points within each group
+  labs(
+      x = "PAM50 Subtype",
+      y = "% of NF1 NLS SE transcript",
+      title = "PAM50",
+      color = "Sample Type",  # Update legend title to reflect color mapping
+      fill = "Sample Type"    # Update legend title for fill as well
+  ) +
+  scale_x_discrete(limits = c("Luminal", "Her2", "Basal")) +  # Reorder x-axis categories with "Luminal"
+  scale_fill_manual(values = c("Primary" = "black", "Metastatic" = "blue")) +  # Set custom fill colors for SampleType.x
+  scale_color_manual(values = c("Primary" = "black", "Metastatic" = "blue")) +  # Set custom colors for points
+  theme_minimal() +
+  theme(
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      axis.line = element_line(color = "black"),  # Add black lines to axes
+      axis.text.y = element_text(size = 12),  # Increase y-axis text size
+      axis.title.x = element_text(size = 14),  # Increase x-axis title size
+      axis.title.y = element_text(size = 14),  # Increase y-axis title size
+      plot.title = element_text(size = 16, hjust = 0.5)  # Increase title font size and center it
+  )
+
+new_data <- filtered_data %>% dplyr::select(Sample_Type.x, deltaNLS_percent, `PAM50 Call`, Patient, `PAM50 Group`)
+
+#Test interaction between Sample.Type and PAM50 Group
+fit_interact <- glmmTMB(
+  deltaNLS_percent / 100 ~ Sample_Type.x * `PAM50 Group` + (1 | Patient),
+  data = new_data,
+  family = beta_family()
+)
+
+emmeans(fit_interact, pairwise ~ Sample_Type.x | `PAM50 Group`, type = "response")
+
+##Stratifying by PAM50 Group 
+# Filter only Luminal samples
+new_data_lum <- new_data %>%
+  filter(`PAM50 Call` %in% c("LumA", "LumB"))
+
+
+fit_luminal=glmmTMB(deltaNLS_percent/100 ~ Sample_Type.x + (1|Patient), data = new_data_lum, family = beta_family())
+
+eme_luminal <- emmeans(fit_luminal, pairwise~Sample_Type.x, type = "response")
+emea_luminal <- as.data.frame(eme_luminal$contrasts)
+emeb_luminal <- as.data.frame(eme_luminal$emmeans)
+emeb_luminal$percent <- emeb_luminal$response*100
+
+# Filter only Her2 samples
+Her2_data <- new_data %>%
+  filter(`PAM50 Call` == "Her2")
+
+Her2_data <- Her2_data %>%     
+  mutate(deltaNLS_percent = deltaNLS_percent / 100)
+
+fit_her2=glmmTMB(deltaNLS_percent/100 ~ Sample_Type.x + (1|Patient), data = Her2_data, family = beta_family())
+
+eme_her2 <- emmeans(fit_her2, pairwise~Sample_Type.x, type = "response")
+emea_her2 <- as.data.frame(eme_her2$contrasts)
+emeb_her2 <- as.data.frame(eme_her2$emmeans)
+emeb_her2$percent <- emeb_her2$response*100
+
+# Filter only Basal samples
+Basal_data <- new_data %>%
+  filter(`PAM50 Call` == "Basal")
+
+Basal_data <- Basal_data %>%     
+  mutate(deltaNLS_percent = deltaNLS_percent / 100)
+
+fit_basal=glmmTMB(deltaNLS_percent/100 ~ Sample_Type.x + (1|Patient), data = Basal_data, family = beta_family())
+
+eme_basal <- emmeans(fit_basal, pairwise~Sample_Type.x, type = "response")
+emea_basal <- as.data.frame(eme_basal$contrasts)
+emeb_basal <- as.data.frame(eme_basal$emmeans)
+emeb_basal$percent <- emeb_basal$response*100
+
+```
+
+```{r NLS SE By Metastatic Site, include=FALSE}
+
+# Replace 0s with a small positive value and 1s with slightly less than 1
+aurora_meta <- aurora_meta %>%
+  mutate(ID_117781_adj = case_when(
+    ID_117781 == 0 ~ 0.000001,
+    ID_117781 == 1 ~ 0.999999,
+    TRUE ~ ID_117781
+  ))
+
+fit_Mets=glmmTMB(ID_117781_adj ~ `Anatomic Site Groups` + (1|Patient), data = aurora_meta, family = beta_family())
+
+eme_Mets <- emmeans(fit_Mets, pairwise~`Anatomic Site Groups`, type = "response")
+emea_Mets <- as.data.frame(eme_Mets$contrasts)
+emeb_Mets <- as.data.frame(eme_Mets$emmeans)
+emeb_Mets$percent <- emeb_Mets$response*100
+
+emeb_Mets$`Anatomic Site Groups` <- factor(emeb_Mets$`Anatomic Site Groups`, levels = c("Breast", "Liver", "Lung", "Lymph node", "Others", "Brain"))
+
+ggplot(aurora_meta, aes(x = `Anatomic Site Groups`, y = deltaNLS_percent)) +
+    geom_boxplot(outlier.shape = NA, color = "black", fill = "grey") +  # Fill boxplot with grey
+    geom_jitter(aes(color = Sample_Type.x), width = 0.2, size = 1.5, alpha = 0.6) +  # Add jittered points with colors based on SampleType.x
+    labs(
+        x = "Metastatic Site",
+        y = "% of NF1 NLS SE transcript",
+        title = "Expression of NF1 NLS SE Transcripts in Metastatic Tumors",
+        color = "Sample Type"  # Update legend title to reflect color mapping
+    ) +
+    scale_x_discrete(limits = c("Breast", "Liver", "Lung", "Lymph node", "Brain", "Others")) +  # Reorder x-axis categories
+    scale_color_manual(values = c("Primary" = "black", "Metastatic" = "red")) +  # Set custom colors for SampleType.x
+    theme_minimal() +
+    theme(
+        panel.grid.major = element_blank(),  # Remove major grid lines
+        panel.grid.minor = element_blank(),  # Remove minor grid lines
+        axis.line = element_line(color = "black"),  # Add black lines to axes
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 12),  # Rotate x-axis labels to 45 degrees
+        axis.text.y = element_text(size = 12),  # Increase y-axis text size
+        axis.title.x = element_text(size = 14),  # Increase x-axis title size
+        axis.title.y = element_text(size = 14),  # Increase y-axis title size
+        plot.title = element_text(size = 16, hjust = 0.5)  # Increase title font size and center it
+    ) +
+    # Add black lines under the asterisks
+    annotate("segment", x = 1, xend = 6, y = 17, yend = 17, color = "black", size = 0.5) +  # Line for Breast vs Others
+    annotate("segment", x = 1, xend = 4, y = 18, yend = 18, color = "black", size = 0.5) +  # Line for Breast vs Lymph node
+    annotate("segment", x = 1, xend = 3, y = 19, yend = 19, color = "black", size = 0.5) +  # Line for Breast vs Lung
+    annotate("segment", x = 1, xend = 2, y = 20, yend = 20, color = "black", size = 0.5) +  # Line for Breast vs Liver
+    # Add asterisks for significant comparisons
+    annotate("text", x = 1.5, y = 20.2, label = "***", size = 5) +  # Breast vs Liver
+    annotate("text", x = 2, y = 19.2, label = "*", size = 5) +  # Breast vs Lung
+    annotate("text", x = 2.5, y = 18.2, label = "*", size = 5) +  # Breast vs Lymph node
+    annotate("text", x = 3, y = 17.2, label = "*", size = 5)   # Breast vs Others
+
+
+
+```

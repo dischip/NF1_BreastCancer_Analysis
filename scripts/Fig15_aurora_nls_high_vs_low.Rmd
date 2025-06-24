@@ -1,0 +1,128 @@
+---
+title: "AURORA NF1 NLS SE High vs. Low"
+output: html_document
+date: "2025-06-23"
+---
+
+```{r Load Libraries, include=FALSE}
+
+library(limma)
+library(edgeR)
+library(stringr)
+library(EnhancedVolcano)
+library(biomaRt)
+library(fgsea)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+
+
+# Import and Preprocess Metadata
+aurora_meta <- read_excel("data/aurora_metadata.xlsx")
+
+nf1_SE_psi <- read_excel("data/nf1_SE_psi.xlsx")
+
+aurora_meta <- left_join(nf1_SE_psi, aurora_meta,  c("Sample_ID" = "SRR Run Identifier") )
+
+metadata <- aurora_meta %>%
+  dplyr::select(-1) %>%
+  group_by(Patient) %>%
+  mutate(
+    primary_expression = if (any(Sample_Type.x == "Primary"))
+      deltaNLS_percent[Sample_Type.x == "Primary"] else NA,
+    deltaNLS_change = case_when(
+      Sample_Type.x == "Metastatic" & deltaNLS_percent > primary_expression ~ "Increased",
+      Sample_Type.x == "Metastatic" & deltaNLS_percent <= primary_expression ~ "Decreased",
+      Sample_Type.x == "Primary" ~ NA_character_
+    )
+  ) %>%
+  ungroup() %>%
+  dplyr::select(-primary_expression)
+
+# Paired Boxplots: deltaNLS Percent Change (Primary vs Metastatic)
+
+### NLS SE high
+
+increased_patients <- metadata %>%
+  filter(Sample_Type.x == "Metastatic" & deltaNLS_change == "Increased") %>%
+  pull(Patient)
+
+# Filter the original dataset to include both primary and metastatic samples for these patients
+matched_data <- metadata %>%
+  filter(Patient %in% increased_patients)
+
+matched_data$Sample_Type.x <- factor(matched_data$Sample_Type.x, levels = c("Primary", "Metastatic"))
+
+# Separate primary and metastatic samples into two data frames and then join them to match pairs
+primary_data <- matched_data %>% filter(Sample_Type.x == "Primary")
+metastatic_data <- matched_data %>% filter(Sample_Type.x == "Metastatic" & deltaNLS_change == "Increased")
+
+# Merge primary and metastatic samples on the Patient column
+plot_data <- primary_data %>%
+  inner_join(metastatic_data, by = "Patient", suffix = c(".primary", ".metastatic"))
+
+# Create the boxplot and add lines for each patient
+increase <- ggplot(matched_data, aes(x = Sample_Type.x, y = deltaNLS_percent)) +
+  geom_boxplot(aes(fill = Sample_Type.x), width = 0.5, alpha = 0.3, outlier.shape = NA) + # Boxplot with transparency
+  geom_point(aes(color = Sample_Type.x), size = 2) + # Aligned points without jitter
+  geom_segment(data = plot_data, aes(x = 1, xend = 2, y = deltaNLS_percent.primary, yend = deltaNLS_percent.metastatic, 
+                                     group = interaction(Patient, deltaNLS_percent.metastatic)), 
+               color = "gray", linetype = "dotted") + # Lines connecting primary to metastatic
+  labs(x = "Sample Type", y = "deltaNLS Percent",
+       title = "Increased") +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),            # Remove grid lines
+    axis.line = element_line(color = "black"), # Add black border to x and y axes
+    panel.border = element_blank(),           # Remove panel border
+    legend.position = "none"
+  )
+
+### NLS SE low
+
+decrease_patients <- metadata %>%
+  filter(Sample_Type.x == "Metastatic" & deltaNLS_change == "Decreased") %>%
+  pull(Patient)
+
+# Filter the original dataset to include both primary and metastatic samples for these patients
+decrease_matched_data <- metadata %>%
+  filter(Patient %in% decrease_patients)
+
+decrease_matched_data <- decrease_matched_data %>%
+  filter(deltaNLS_change != "Increased" | is.na(deltaNLS_change))
+
+decrease_matched_data$Sample_Type.x <- factor(decrease_matched_data$Sample_Type.x, levels = c("Primary", "Metastatic"))
+
+# Separate primary and metastatic samples into two data frames and then join them to match pairs
+decrease_primary_data <- decrease_matched_data %>% filter(Sample_Type.x == "Primary")
+decrease_metastatic_data <- decrease_matched_data %>% filter(Sample_Type.x == "Metastatic" & deltaNLS_change == "Decreased")
+
+# Merge primary and metastatic samples on the Patient column
+decrease_plot_data <- decrease_primary_data %>%
+  inner_join(decrease_metastatic_data, by = "Patient", suffix = c(".primary", ".metastatic"))
+
+# Create the boxplot and add lines for each patient
+decrease <- ggplot(decrease_matched_data, aes(x = Sample_Type.x, y = deltaNLS_percent)) +
+  geom_boxplot(aes(fill = Sample_Type.x), width = 0.5, alpha = 0.3, outlier.shape = NA) + # Boxplot with transparency
+  geom_point(aes(color = Sample_Type.x), size = 2) + # Aligned points without jitter
+  geom_segment(data = decrease_plot_data, aes(x = 1, xend = 2, y = deltaNLS_percent.primary, yend = deltaNLS_percent.metastatic, 
+                                     group = interaction(Patient, deltaNLS_percent.metastatic)), 
+               color = "gray", linetype = "dotted") + # Lines connecting primary to metastatic
+  labs(x = "Sample Type", y = "deltaNLS Percent",
+       title = "Decreased") +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),            # Remove grid lines
+    axis.line = element_line(color = "black"), # Add black border to x and y axes
+    panel.border = element_blank(),           # Remove panel border
+    legend.position = "none"
+  )
+
+grid.arrange(increase, decrease, ncol = 2)
+
+
+
+```
+
+

@@ -1,0 +1,137 @@
+---
+title: "rMAPs heatMAPs"
+author: "Ian Beddows"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+params:
+  rmd: ""
+output:
+  html_document:
+    dev: png
+    code_folding: hide
+    self_contained: yes
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    df_print: paged
+    css: styles.css
+    theme: journal
+---
+
+```{r setup,echo=FALSE}
+# 
+# knitr::opts_chunk$set(
+# 	echo = TRUE,
+# 	message = FALSE,
+# 	warning = FALSE,
+# 	cache = TRUE,
+# 	cache.lazy = FALSE
+# )
+
+```
+
+```{r loadlibs}
+# getwd()
+suppressPackageStartupMessages({
+    library(yaml)
+    library(edgeR)
+    # library(kableExtra)
+    library(tidyverse)
+    library(reshape2)
+    library(matrixStats)
+    library(SummarizedExperiment)
+    library(DESeq2)
+    library(ggrepel)
+    library(gridExtra)
+    require(grid)
+    # library(pheatmap)
+    library(cowplot)
+    library(RColorBrewer)
+    library(edgeR)
+    library(clusterProfiler)
+    library(enrichplot)
+    library(msigdbr)
+    library(biomaRt)
+    library(org.Hs.eg.db)
+    # library(vegan)
+    # library(bbcRNA)
+    library(ComplexHeatmap)
+    library(patchwork)
+    library(viridis)
+    library(ggridges)
+})
+
+
+# library(org.Rn.eg.db)
+```
+
+```{r load_data}
+
+basedir <- 'data/rmaps_output/'
+folders <- list.files(basedir)
+list.files(paste0(basedir,folders[1]))
+
+filename <- 'pVal.up.vs.bg.RNAmap.txt'
+column <- 'smallest_p_in_targetExon.5prime'
+
+files <- paste0(basedir,folders,'/',filename)
+
+data_list <- lapply(files,FUN=function(x){
+    y <- read.delim(x,sep="\t")[,c('RBP',column)]
+})
+
+df <- purrr::reduce(data_list, left_join, by = "RBP") 
+
+# dim(df)
+colnames(df)[2:7] <- gsub(x=folders,pattern='rmaps_',replacement = '')
+
+df <- df %>%
+  separate(RBP, into = c("RBP", "motif"), sep = "\\.")
+
+
+# create a meta for the heatmap
+# Split column names and store as a list
+split_names <- str_split(colnames(df)[3:8], "_")
+
+# Convert list of split names into a dataframe
+meta <- as.data.frame(do.call(rbind, split_names))
+colnames(meta) <- c("Cell Line", "Treatment")  # Rename appropriately
+meta$sample <- paste(meta$`Cell Line`,meta$Treatment,sep="_")
+
+# filter for only significant ones across any treatment
+keep <- apply(df[,meta$sample],1,function(x){
+  any(x<0.05)
+})
+
+df.filtered <- df[keep,]
+
+# ok now make the heatmap!
+hm <- Heatmap(-log10(df.filtered[,meta$sample]),
+        column_split = factor(meta$Treatment, levels = c('E2','Tam','Cobi')),
+        cluster_rows = TRUE,
+        show_column_dend = FALSE,
+        col = viridis::magma(n=100),
+        cluster_column_slices = FALSE,
+        row_split = df.filtered$RBP,
+        cluster_row_slices = TRUE,
+        row_title_rot = 0,
+        gap = unit(0.25, "mm"),
+        row_title_gp = gpar(fontsize=5),
+        show_row_names = FALSE
+        )
+pdf(file='~/Desktop/rMaps_heatMAPs.pdf',width = 5, height = 10); print(hm); dev.off()
+
+```
+
+
+
+
+
+
+
+
+
+
+
